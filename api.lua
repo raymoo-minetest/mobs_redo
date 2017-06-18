@@ -5,6 +5,7 @@ mobs = {}
 mobs.mod = "redo"
 mobs.version = "20170616"
 
+local use_cmi = minetest.global_exists("cmi")
 
 -- Intllib
 local S
@@ -370,7 +371,7 @@ end
 
 
 -- check if mob is dead or only hurt
-local check_for_death = function(self, cause)
+local check_for_death = function(self, cause, cmi_cause)
 
 	-- has health actually changed?
 	if self.health == self.old_health and self.health > 0 then
@@ -419,6 +420,9 @@ local check_for_death = function(self, cause)
 	if self.on_die then
 
 		self.on_die(self, pos)
+		if use_cmi then
+			cmi.notify_die(self.object, cmi_cause)
+		end
 		self.object:remove()
 
 		return true
@@ -439,9 +443,15 @@ local check_for_death = function(self, cause)
 		set_animation(self, "die")
 
 		minetest.after(2, function(self)
+			if use_cmi then
+				cmi.notify_die(self.object, cmi_cause)
+			end
 			self.object:remove()
 		end, self)
 	else
+		if use_cmi then
+			cmi.notify_die(self.object, cmi_cause)
+		end
 		self.object:remove()
 	end
 
@@ -499,15 +509,13 @@ local node_ok = function(pos, fallback)
 
 	local node = minetest.get_node_or_nil(pos)
 
-	if not node then
-		return minetest.registered_nodes[fallback]
-	end
-
-	if minetest.registered_nodes[node.name] then
+	if node and minetest.registered_nodes[node.name] then
 		return node
 	end
 
-	return minetest.registered_nodes[fallback]
+	return {
+		name = fallback,
+	}
 end
 
 
@@ -549,12 +557,16 @@ local do_env_damage = function(self)
 
 		effect(pos, 5, "tnt_smoke.png")
 
-		if check_for_death(self, "light") then return end
+		local cmi_cause = {
+			type = "light",
+		}
+		if check_for_death(self, "light", cmi_cause) then return end
 	end
 
 	-- what is mob standing in?
 	pos.y = pos.y + self.collisionbox[2] + 0.25 -- foot level
-	self.standing_in = node_ok(pos, "air").name
+	local node = node_ok(pos, "air")
+	self.standing_in = node.name
 --	print ("standing in " .. self.standing_in)
 
 	-- don't fall when on ignore, just stand still
@@ -577,7 +589,12 @@ local do_env_damage = function(self)
 
 			effect(pos, 5, "bubble.png", nil, nil, 1, nil)
 
-			if check_for_death(self, "water") then return end
+			local cmi_cause = {
+				type = "environment",
+				pos = pos,
+				node = node,
+			}
+			if check_for_death(self, "water", cmi_cause) then return end
 		end
 
 	-- lava or fire
@@ -592,7 +609,12 @@ local do_env_damage = function(self)
 
 			effect(pos, 5, "fire_basic_flame.png", nil, nil, 1, nil)
 
-			if check_for_death(self, "lava") then return end
+			local cmi_cause = {
+				type = "environment",
+				pos = pos,
+				node = node,
+			}
+			if check_for_death(self, "lava", cmi_cause) then return end
 		end
 
 	-- damage_per_second node check
@@ -602,7 +624,12 @@ local do_env_damage = function(self)
 
 		effect(pos, 5, "tnt_smoke.png")
 
-		if check_for_death(self, "dps") then return end
+		local cmi_cause = {
+			type = "environment",
+			pos = pos,
+			node = node,
+		}
+		if check_for_death(self, "dps", cmi_cause) then return end
 	end
 
 	--- suffocation inside solid node
@@ -613,10 +640,15 @@ local do_env_damage = function(self)
 
 		self.health = self.health - self.suffocation
 
-		if check_for_death(self, "suffocation") then return end
+		local cmi_cause = {
+			type = "environment",
+			pos = pos,
+			node = node,
+		}
+		if check_for_death(self, "suffocation", cmi_cause) then return end
 	end
 
-	check_for_death(self, "")
+	check_for_death(self, "", { type = "unknown" })
 end
 
 
@@ -1957,7 +1989,10 @@ local falling = function(self, pos)
 
 				effect(pos, 5, "tnt_smoke.png", 1, 2, 2, nil)
 
-				if check_for_death(self, "fall") then
+				local cmi_cause = {
+					type = "fall",
+				}
+				if check_for_death(self, "fall", cmi_cause) then
 					return
 				end
 			end
@@ -2004,18 +2039,22 @@ local mob_punch = function(self, hitter, tflp, tool_capabilities, dir)
 		tflp = 0.2
 	end
 
-	for group,_ in pairs( (tool_capabilities.damage_groups or {}) ) do
+	if use_cmi then
+		damage = cmi.calculate_damage(self.object, hitter, tflp, tool_capabilities, dir)
+	else
+		for group,_ in pairs( (tool_capabilities.damage_groups or {}) ) do
 
-		tmp = tflp / (tool_capabilities.full_punch_interval or 1.4)
+			tmp = tflp / (tool_capabilities.full_punch_interval or 1.4)
 
-		if tmp < 0 then
-			tmp = 0.0
-		elseif tmp > 1 then
-			tmp = 1.0
+			if tmp < 0 then
+				tmp = 0.0
+			elseif tmp > 1 then
+				tmp = 1.0
+			end
+
+			damage = damage + (tool_capabilities.damage_groups[group] or 0)
+				* tmp * ((armor[group] or 0) / 100.0)
 		end
-
-		damage = damage + (tool_capabilities.damage_groups[group] or 0)
-			* tmp * ((armor[group] or 0) / 100.0)
 	end
 
 	-- check for tool immunity or special damage
@@ -2035,6 +2074,13 @@ local mob_punch = function(self, hitter, tflp, tool_capabilities, dir)
 	end
 
 --	print ("Mob Damage is", damage)
+
+	if use_cmi then
+		local cancel =  cmi.notify_punch(self.object, hitter, tflp, tool_capabilities, dir, damage)
+		if cancel then
+			return
+		end
+	end
 
 	-- add weapon wear
 	if tool_capabilities then
@@ -2081,13 +2127,17 @@ local mob_punch = function(self, hitter, tflp, tool_capabilities, dir)
 		-- do damage
 		self.health = self.health - floor(damage)
 
+		local cmi_cause = {
+			type = "punch",
+			puncher = hitter,
+		}
 		-- exit here if dead, special item check
 		if weapon:get_name() == "mobs:pick_lava" then
-			if check_for_death(self, "lava") then
+			if check_for_death(self, "lava", cmi_cause) then
 				return
 			end
 		else
-			if check_for_death(self, "hit") then
+			if check_for_death(self, "hit", cmi_cause) then
 				return
 			end
 		end
@@ -2220,6 +2270,10 @@ local mob_staticdata = function(self)
 		self.rotate = math.rad(90)
 	end
 
+	if use_cmi then
+		self.serialized_cmi_components = cmi.serialize_components(self.cmi_components)
+	end
+	
 	local tmp = {}
 
 	for _,stat in pairs(self) do
@@ -2228,7 +2282,8 @@ local mob_staticdata = function(self)
 
 		if  t ~= "function"
 		and t ~= "nil"
-		and t ~= "userdata" then
+		and t ~= "userdata"
+		and _ ~= "cmi_components" then
 			tmp[_] = self[_]
 		end
 	end
@@ -2239,7 +2294,7 @@ end
 
 
 -- activate mob and reload settings
-local mob_activate = function(self, staticdata, def)
+local mob_activate = function(self, staticdata, def, dtime)
 
 	-- remove monsters in peaceful mode, or when no data
 	if (self.type == "monster" and peaceful_only) then
@@ -2339,12 +2394,21 @@ local mob_activate = function(self, staticdata, def)
 	self.object:set_properties(self)
 	set_yaw(self.object, (random(0, 360) - 180) / 180 * pi)
 	update_tag(self)
+
+	if use_cmi then
+		self.cmi_components = cmi.activate_components(self.serialized_cmi_components)
+		cmi.notify_activate(self.object, dtime)
+	end
 end
 
 
 -- main mob function
 local mob_step = function(self, dtime)
 
+	if use_cmi then
+		cmi.notify_step(self.object, dtime)
+	end
+	
 	local pos = self.object:getpos()
 	local yaw = 0
 
@@ -2572,14 +2636,15 @@ minetest.register_entity(name, {
 
 	on_punch = mob_punch,
 
-	on_activate = function(self, staticdata)
-		return mob_activate(self, staticdata, def)
+	on_activate = function(self, staticdata, dtime)
+		return mob_activate(self, staticdata, def, dtime)
 	end,
 
 	get_staticdata = function(self)
 		return mob_staticdata(self)
 	end,
 
+	cmi_is_mob = true,
 })
 
 end -- END mobs:register_mob function
